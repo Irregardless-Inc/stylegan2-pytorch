@@ -923,7 +923,7 @@ class Trainer():
         return generated_images.clamp_(0., 1.)
 
     @torch.no_grad()
-    def generate_interpolation(self, num = 0, num_image_tiles = 8, trunc = 1.0, save_frames = False):
+    def generate_interpolation(self, num = 0, num_image_tiles = 8, trunc = 1.0, save_frames = False, num_frames=100, fps=12.5):
         self.GAN.eval()
         ext = 'jpg' if not self.transparent else 'png'
         num_rows = num_image_tiles
@@ -938,7 +938,7 @@ class Trainer():
         latents_high = noise(num_rows ** 2, latent_dim)
         n = image_noise(num_rows ** 2, image_size)
 
-        ratios = torch.linspace(0., 8., 100)
+        ratios = torch.linspace(0., 8., num_frames)
 
         frames = []
         for ratio in tqdm(ratios):
@@ -949,7 +949,15 @@ class Trainer():
             pil_image = transforms.ToPILImage()(images_grid.cpu())
             frames.append(pil_image)
 
-        frames[0].save(str(self.results_dir / self.name / f'{str(num)}.gif'), save_all=True, append_images=frames[1:], duration=80, loop=0, optimize=True)
+        ms_per_frame = int(1000 / fps)
+        frames[0].save(
+            str(self.results_dir / self.name / f'{str(num)}.gif'), 
+            save_all=True, 
+            append_images=frames[1:], 
+            duration=ms_per_frame, 
+            loop=0, 
+            optimize=True
+        )
 
         if save_frames:
             folder_path = (self.results_dir / self.name / f'{str(num)}')

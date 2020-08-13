@@ -35,6 +35,8 @@ def train_from_folder(
     no_const = False,
     aug_prob = 0.,
     dataset_aug_prob = 0.,
+    fps = 12.5,
+    num_frames = 100
 ):
     model = Trainer(
         name,        
@@ -77,7 +79,7 @@ def train_from_folder(
         now = datetime.now()
         timestamp = now.strftime("%m-%d-%Y_%H-%M-%S")
         samples_name = f'generated-{timestamp}'
-        model.generate_interpolation(samples_name, num_image_tiles, save_frames = save_frames)
+        model.generate_interpolation(samples_name, num_image_tiles, save_frames = save_frames, num_frames=num_frames, fps=fps)
         print(f'interpolation generated at {results_dir}/{name}/{samples_name}')
         return
 
