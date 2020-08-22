@@ -1086,6 +1086,17 @@ class Trainer():
         pl_mean = default(self.pl_mean, 0)
         print(f'G: {self.g_loss:.2f} | D: {self.d_loss:.2f} | GP: {self.last_gp_loss:.2f} | PL: {pl_mean:.2f} | CR: {self.last_cr_loss:.2f} | Q: {self.q_loss:.2f}')
 
+    def log_dict(self):
+        pl_mean = default(self.pl_mean, 0)
+        return {
+            "G": self.g_loss,
+            "D": self.d_loss,
+            "GP": self.last_gp_loss,
+            "PL": self.pl_mean,
+            "CR": self.last_cr_loss,
+            "Q": self.q_loss,
+        }
+
     def model_name(self, num):
         return str(self.models_dir / self.name / f'model_{num}.pt')
 
