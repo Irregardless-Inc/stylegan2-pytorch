@@ -27,6 +27,9 @@ from linear_attention_transformer import ImageLinearAttention
 
 from PIL import Image
 from pathlib import Path
+import collections
+from dataclasses import dataclass, field
+from typing import Any, Dict
 
 try:
     from apex import amp
@@ -236,7 +239,7 @@ def resize_to_minimum_size(min_size, image):
     return image
 
 class Dataset(data.Dataset):
-    def __init__(self, folder, image_size, transparent = False, aug_prob = 0.):
+    def __init__(self, folder, image_size, transparent = False, dataset_aug_prob = 0.):
         super().__init__()
         self.folder = folder
         self.image_size = image_size
@@ -249,7 +252,7 @@ class Dataset(data.Dataset):
             transforms.Lambda(convert_image_fn),
             transforms.Lambda(partial(resize_to_minimum_size, image_size)),
             transforms.Resize(image_size),
-            RandomApply(aug_prob, transforms.RandomResizedCrop(image_size, scale=(0.5, 1.0), ratio=(0.98, 1.02)), transforms.CenterCrop(image_size)),
+            RandomApply(dataset_aug_prob, transforms.RandomResizedCrop(image_size, scale=(0.5, 1.0), ratio=(0.98, 1.02)), transforms.CenterCrop(image_size)),
             transforms.ToTensor(),
             transforms.Lambda(expand_greyscale(transparent))
         ])
@@ -281,19 +284,116 @@ def random_hflip(tensor, prob):
         return tensor
     return torch.flip(tensor, dims=(3,))
 
+
+
+@dataclass
+class RoutineConfig:
+    name: str
+    prob: float
+    args: Dict[str, Any] = field(default_factory=dict)
+
+
+class Routines:
+    
+    DEFAULT_AUGMENTATION = [
+        RoutineConfig("grayscale", 0.05),
+        RoutineConfig("saturation", 0.2),
+        RoutineConfig("contrast", 0.2),
+        RoutineConfig("brightness", 0.2),
+        RoutineConfig("noise", 0.2),
+        RoutineConfig("flip", 0.5),
+        RoutineConfig("crop", 0.2),
+        RoutineConfig("edge", 0.2),
+    ]
+
+    @classmethod
+    def grayscale(cls, tensor):
+        r = tensor[:, 0:1, :, :]
+        g = tensor[:, 1:2, :, :]
+        b = tensor[:, 2:3, :, :]
+        return (0.3 * r + 0.59 * g + 0.11 * b).expand(*tensor.shape)
+
+    @classmethod
+    def saturation(cls, tensor, intensities=(0.8, 1.2)):
+        alpha = intensities[0] + random() * (intensities[1] - intensities[0])
+        blend = cls.grayscale(tensor)
+        return alpha * tensor + (1 - alpha) * blend
+
+    @classmethod
+    def contrast(cls, tensor, intensities=(0.8, 1.2)):
+        alpha = intensities[0] + random() * (intensities[1] - intensities[0])
+        blend = cls.grayscale(tensor).mean() * torch.ones_like(tensor)
+        return alpha * tensor + (1 - alpha) * blend
+
+    @classmethod
+    def brightness(cls, tensor, intensities=(0.8, 1.2)):
+        alpha = intensities[0] + random() * (intensities[1] - intensities[0])
+        blend = torch.zeros_like(tensor)
+        return alpha * tensor + (1 - alpha) * blend
+
+    @classmethod
+    def noise(cls, tensor, std=0.1):
+        return tensor + std * torch.randn_like(tensor)
+
+    @classmethod
+    def flip(cls, tensor):
+        return torch.flip(tensor, dims=(3,))
+
+    @classmethod
+    def crop(cls, tensor, scales=(0.8, 1.0)):
+        b, c, h, w = tensor.shape
+        scale = scales[0] + (scales[1] - scales[0]) * random()
+        new_w = int(w * scale)
+        new_h = int(h * scale)        
+        new_x = int(random() * (w - new_w))
+        new_y = int(random() * (h - new_h))
+        tensor = tensor[:, :, new_x:new_x + new_w, new_y:new_y + new_h]
+        return F.interpolate(tensor, size=(h, w), mode="bilinear", align_corners=False)
+
+    @classmethod
+    def edge(cls, tensor):
+        b, c, h, w = tensor.shape
+        kernel = torch.Tensor([
+            [-1, -1, -1],
+            [-1, 8, -1],
+            [-1, -1, -1],
+        ]).to(tensor.device).expand(3, 1, 3, 3)
+        gray = cls.grayscale(tensor).expand(*tensor.shape)
+        return F.conv2d(gray, kernel, stride=1, padding=1, groups=c)
+
+
+    @classmethod
+    def augment(cls, tensor, routine_configs=None):
+        if routine_configs is None:
+            routine_configs = Routines.DEFAULT_AUGMENTATION
+        for rc in routine_configs:
+            if random() < rc.prob:
+                tensor = getattr(Routines, rc.name)(tensor, **rc.args)
+        return tensor
+
 class AugWrapper(nn.Module):
     def __init__(self, D, image_size):
         super().__init__()
         self.D = D
 
-    def forward(self, images, prob = 0., detach = False):
-        if random() < prob:
+    def forward(self, images, prob = 0., detach = False, enable_taylor_aug=False):
+        if enable_taylor_aug:
+            if prob > 0:
+                raise RuntimeError("Can not use taylor augmentation with prob > 0")
+            
+            images = Routines.augment(
+                images, routine_configs=Routines.DEFAULT_AUGMENTATION
+            )
+
+            if detach:
+                images = images.detach()
+        elif random() < prob:
             random_scale = random_float(0.5, 0.9)
             images = random_hflip(images, prob=0.5)
             images = random_crop_and_resize(images, scale = random_scale)
 
-        if detach:
-            images.detach_()
+            if detach:
+                images.detach_()
 
         return self.D(images)
 
@@ -621,7 +721,10 @@ class StyleGAN2(nn.Module):
         return x
 
 class Trainer():
-    def __init__(self, name, results_dir, models_dir, image_size, network_capacity, transparent = False, batch_size = 4, mixed_prob = 0.9, gradient_accumulate_every=1, lr = 2e-4, ttur_mult = 2, num_workers = None, save_every = 1000, trunc_psi = 0.6, fp16 = False, cl_reg = False, fq_layers = [], fq_dict_size = 256, attn_layers = [], no_const = False, aug_prob = 0., dataset_aug_prob = 0., *args, **kwargs):
+    def __init__(self, name, results_dir, models_dir, image_size, network_capacity, transparent = False, batch_size = 4, mixed_prob = 0.9, gradient_accumulate_every=1, lr = 2e-4, ttur_mult = 2, num_workers = None, save_every = 1000, trunc_psi = 0.6, fp16 = False, cl_reg = False, fq_layers = [], fq_dict_size = 256, attn_layers = [], no_const = False, 
+                aug_prob = 0., dataset_aug_prob = 0., enable_taylor_aug=False,
+                *args, **kwargs
+    ):
         self.GAN_params = [args, kwargs]
         self.GAN = None
 
@@ -673,6 +776,7 @@ class Trainer():
 
         self.loader = None
         self.dataset_aug_prob = dataset_aug_prob
+        self.enable_taylor_aug = enable_taylor_aug
 
     def init_GAN(self):
         args, kwargs = self.GAN_params
@@ -698,7 +802,7 @@ class Trainer():
         return {'image_size': self.image_size, 'network_capacity': self.network_capacity, 'transparent': self.transparent, 'fq_layers': self.fq_layers, 'fq_dict_size': self.fq_dict_size, 'attn_layers': self.attn_layers, 'no_const': self.no_const, 'ttur_mult': self.ttur_mult}
 
     def set_data_src(self, folder):
-        self.dataset = Dataset(folder, self.image_size, transparent = self.transparent, aug_prob = self.dataset_aug_prob)
+        self.dataset = Dataset(folder, self.image_size, transparent = self.transparent, dataset_aug_prob = self.dataset_aug_prob)
         self.loader = cycle(data.DataLoader(self.dataset, num_workers = default(self.num_workers, num_cores), batch_size = self.batch_size, drop_last = True, shuffle=True, pin_memory=True))
 
     def train(self):
@@ -764,11 +868,11 @@ class Trainer():
             w_styles = styles_def_to_tensor(w_space)
 
             generated_images = self.GAN.G(w_styles, noise)
-            fake_output, fake_q_loss = self.GAN.D_aug(generated_images.clone().detach(), detach = True, prob = aug_prob)
+            fake_output, fake_q_loss = self.GAN.D_aug(generated_images.clone().detach(), detach = True, prob = aug_prob, enable_taylor_aug=self.enable_taylor_aug)
 
             image_batch = next(self.loader).cuda()
             image_batch.requires_grad_()
-            real_output, real_q_loss = self.GAN.D_aug(image_batch, prob = aug_prob)
+            real_output, real_q_loss = self.GAN.D_aug(image_batch, prob = aug_prob, enable_taylor_aug=self.enable_taylor_aug)
 
             divergence = (F.relu(1 + real_output) + F.relu(1 - fake_output)).mean()
             disc_loss = divergence
@@ -803,7 +907,7 @@ class Trainer():
             w_styles = styles_def_to_tensor(w_space)
 
             generated_images = self.GAN.G(w_styles, noise)
-            fake_output, _ = self.GAN.D_aug(generated_images, prob = aug_prob)
+            fake_output, _ = self.GAN.D_aug(generated_images, prob = aug_prob, enable_taylor_aug=self.enable_taylor_aug)
             loss = fake_output.mean()
             gen_loss = loss
 
@@ -910,7 +1014,7 @@ class Trainer():
             samples = evaluate_in_chunks(self.batch_size, S, z).cpu().numpy()
             self.av = np.mean(samples, axis = 0)
             self.av = np.expand_dims(self.av, axis = 0)
-            
+        
         w_space = []
         for tensor, num_layers in style:
             tmp = S(tensor)

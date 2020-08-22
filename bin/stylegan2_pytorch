@@ -34,6 +34,7 @@ def train_from_folder(
     attn_layers = [],
     no_const = False,
     aug_prob = 0.,
+    enable_taylor_aug=False,
     dataset_aug_prob = 0.,
     fps = 12.5,
     num_frames = 100
@@ -59,6 +60,7 @@ def train_from_folder(
         attn_layers = attn_layers,
         no_const = no_const,
         aug_prob = aug_prob,
+        enable_taylor_aug = enable_taylor_aug,
         dataset_aug_prob = dataset_aug_prob
     )
 
